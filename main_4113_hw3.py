@@ -29,7 +29,6 @@ for path in DIRECTORY_LIST:
         print ("Successfully created the directory " + path)
 
 #Parameters passed in by user
-R_GRID_WIDTH = (1/200)
 ALPHA = .36
 DELTA = .025
 BETA = .99
@@ -40,7 +39,7 @@ IND_K_GRID_N = 101
 AGG_K_MAX = 80
 AGG_K_MIN = 10
 AGG_K_GRID_N = 8
-N_SIMULATION = 1000
+N_SIMULATION = 10000
 T_SIMULATION = 1100
 
 #Make the PI Transition matrix
@@ -83,36 +82,82 @@ def main():
 
     #Initial guess for Law of motion
     alpha_b_new,beta_b_new,alpha_g_new,beta_g_new = [0,1,0,1]
-    norm = 100
-    while norm >1*10e-5:
-        #Update coefficients on LOM
-        alpha_b_old,beta_b_old,alpha_g_old,beta_g_old = [alpha_b_new,beta_b_new,alpha_g_new,beta_g_new]
 
-        def LOM(ln_K,agg_productivity):
-            if agg_productivity ==0.99:
-                return alpha_b_old + beta_b_old*ln_K
-            if agg_productivity == 1.01:
-                return alpha_g_old + beta_g_old*ln_K
+    #Type 1 is parts b,c. Type 2 is part d (robustness). All I am doing is chaning the seed!
+    #Note when doing type 2, the initial guess for LOM is the last one from step 1
+    for type in range(1,3):
+        if type == 1:
+            title = "Original"
+            save_file = "original_agg_capital.png"
+        elif type == 2:
+            title = "Robust"
+            save_file = "robust_agg_capital.png"
 
-        #Get optimal policy function k'[k,K,s,z] (part a)
-        kprime = solve_policy_function(ind_K_grid,agg_K_grid,LOM,labor_states,productivity_states)
+        norm = 100
+        while norm >1*10e-5:
+            #Update coefficients on LOM
+            alpha_b_old,beta_b_old,alpha_g_old,beta_g_old = [alpha_b_new,beta_b_new,alpha_g_new,beta_g_new]
 
-        #Get the aggregate time series with the given policy function kprime
-        agg_K_time_series = simulate_economy(ind_K_grid,agg_K_grid,productivity_states,kprime)
+            def LOM(ln_K,agg_productivity):
+                if agg_productivity ==0.99:
+                    return alpha_b_old + beta_b_old*ln_K
+                if agg_productivity == 1.01:
+                    return alpha_g_old + beta_g_old*ln_K
 
-        #Get new coefficients for LOM based on this iteration
-        alpha_b_new,beta_b_new,alpha_g_new,beta_g_new = get_autoregressive_coef(agg_K_time_series)
+            #Get optimal policy function k'[k,K,s,z] (part a)
+            kprime = solve_policy_function(ind_K_grid,agg_K_grid,LOM,labor_states,productivity_states)
 
-        #See if LOM coefficients have changed by a lot or not
-        norm =max(abs(alpha_b_new-alpha_b_old),abs(beta_b_new-beta_b_old), \
-                  abs(alpha_g_new-alpha_g_old),abs(beta_g_new-beta_g_old))
+            #Get the aggregate time series with the given policy function kprime
+            agg_K_time_series = simulate_economy(ind_K_grid,agg_K_grid,productivity_states,kprime,seed=type)
+
+            #Get new coefficients for LOM based on this iteration (and R^2)
+            alpha_b_new,beta_b_new,r2_b,alpha_g_new,beta_g_new,r2_g = get_autoregressive_coef(agg_K_time_series)
+
+            #See if LOM coefficients have changed by a lot or not
+            norm =max(abs(alpha_b_new-alpha_b_old),abs(beta_b_new-beta_b_old), \
+                      abs(alpha_g_new-alpha_g_old),abs(beta_g_new-beta_g_old))
+
+        #part (c) Plot aggregate capital stock time series in the lsat simulation vs
+        #The aggregate capital stock using initial capital and LOM
+        plot_actual_vs_predicted_capital(agg_K_time_series,LOM,productivity_states \
+            ,r2_b,r2_g,title,save_file)
 
     print("Finishing")
 
-def simulate_economy(ind_K_grid,agg_K_grid,productivity_states,kprime):
+def plot_actual_vs_predicted_capital(agg_K_time_series,LOM,productivity_states,r2_b,r2_g,title,file_name):
+    '''This plots the actual series of capital from the last iteration from the
+    approximation using the LOMs for good and bad states.'''
+    time_grid = np.arange(start=0,stop=T_SIMULATION-100)
+    df = pd.DataFrame(agg_K_time_series, columns=['K', 'agg_state'])
+    # Drop first  100 periods
+    df = df.iloc[100:]
+    #Convert to int to use as an index
+    df = df.astype({'agg_state': 'int32'})
+    #Create the approximation from the law of motion
+    df['K_from_LOM'] = 0
+    df['K_from_LOM'].iloc[0] = df['K'].iloc[0]
+    for t in range(1,T_SIMULATION-100):
+        #Use LOM. LOM function gives ln_K_t+1 so need to exponentiate
+        df['K_from_LOM'].iloc[t] = np.exp(LOM(np.log(df['K_from_LOM'].iloc[t-1]), \
+                            productivity_states[df['agg_state'].iloc[t-1]]))
+
+    plt.plot(time_grid,df['K'],label='Actual K',color='blue')
+    plt.plot(time_grid,df['K_from_LOM'], label='K from Law of Motion', color='green')
+    plt.xlabel('Period (t)')
+    plt.ylabel('Aggregate Capital (K)')
+    plt.title(title + ' Capital Graph. R2 for good: ' + str(round(r2_g,3)) + ' R2 for bad: ' + str(round(r2_b,3)))
+    plt.legend(loc='best')
+
+    #Save plot
+    file_name = os.path.join(FINAL_OUTPUT_PATH, file_name)
+    plt.savefig(file_name, dpi=150)
+    #plt.show()
+    plt.close()
+
+def simulate_economy(ind_K_grid,agg_K_grid,productivity_states,kprime,seed):
     '''This program simulates the shocks for the individuals and returns aggregate capital after each t'''
     # Set seed so I get the same set of shocks every time
-    np.random.seed(1)
+    np.random.seed(seed)
     # Create a random vector for each t from uniform distribution. This way each iteration has the same shock
     rand = np.random.rand(N_SIMULATION,T_SIMULATION)
 
@@ -128,7 +173,6 @@ def simulate_economy(ind_K_grid,agg_K_grid,productivity_states,kprime):
     simulated_individuals[:,1] = (np.where(rand[:,0] < .04, 0, 1))
     #Create an array that stores aggregate K (the object of interest) (column 0), and state (column 1)
     agg_K = np.zeros((T_SIMULATION,2))
-
 
     for t in range(T_SIMULATION):
         #Update todays state with yesterdays tomorrow state
@@ -253,8 +297,8 @@ def get_autoregressive_coef(agg_K_time_series):
     df = pd.DataFrame(agg_K_time_series, columns=['K', 'agg_state'])
     df['L1_K'] = df['K'].shift(1)
     df['L1_agg_state'] = df['agg_state'].shift(1)
-    #Set lagged K to be missing if it changed states in that period
-    df.loc[df['L1_agg_state']-df['agg_state']!=0, 'L1_K'] = np.nan
+    #Set lagged K to be missing if it changed states in that period  (not sure if this should be there)
+    #df.loc[df['L1_agg_state']-df['agg_state']!=0, 'L1_K'] = np.nan
     #Create log variables
     df['ln_K'] = np.log(df['K'])
     df['L1_ln_K'] = np.log(df['L1_K'])
@@ -265,14 +309,16 @@ def get_autoregressive_coef(agg_K_time_series):
     bad_state_df = df[df['agg_state']==0]
     good_results = smf.ols('ln_K ~ L1_ln_K', data=good_state_df).fit()
     bad_results = smf.ols('ln_K ~ L1_ln_K', data=bad_state_df).fit()
-    #print(good_results.summary())
+    #Extract parameters from model
     alpha_g = good_results.params[0]
     beta_g = good_results.params[1]
-    #print(bad_results.summary())
+    r2_g = good_results.rsquared
+
     alpha_b = bad_results.params[0]
     beta_b = bad_results.params[1]
+    r2_b = bad_results.rsquared
 
-    return alpha_b,beta_b,alpha_g,beta_g
+    return alpha_b,beta_b,r2_b,alpha_g,beta_g,r2_g
 
 if __name__ == '__main__':
     main()
