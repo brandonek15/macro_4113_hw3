@@ -1,9 +1,9 @@
 import os
 import platform
 import numpy as np
-import math
 from matplotlib import pyplot as plt
-import scipy.optimize
+import statsmodels.formula.api as smf
+import pandas as pd
 from scipy.interpolate import RectBivariateSpline
 
 #Set the directory
@@ -72,8 +72,6 @@ AGG_PI[1,1] = 7/8
 
 def main():
     print("Starting main_pset3.py")
-    # Set seed so I get the same results every time
-    np.random.seed(1)
 
     #Define the capital grids
     ind_K_grid = np.arange(start=0, stop=.5+.005, step=.005)
@@ -83,45 +81,71 @@ def main():
     labor_states = [0,1]
     productivity_states = [.99,1.01]
 
-    alpha_b,beta_b,alpha_g,beta_g = [0,1,0,1]
     #Initial guess for Law of motion
-    def LOM(ln_K,agg_productivity):
-        if agg_productivity ==0.99:
-            return alpha_b + beta_b*ln_K
-        if agg_productivity == 1.01:
-            return alpha_g + beta_g*ln_K
+    alpha_b_new,beta_b_new,alpha_g_new,beta_g_new = [0,1,0,1]
+    norm = 100
+    while norm >1*10e-5:
+        #Update coefficients on LOM
+        alpha_b_old,beta_b_old,alpha_g_old,beta_g_old = [alpha_b_new,beta_b_new,alpha_g_new,beta_g_new]
 
-    #Get optimal policy function k'[k,K,s,z] (part a)
-    kprime = solve_policy_function(ind_K_grid,agg_K_grid,LOM,labor_states,productivity_states)
+        def LOM(ln_K,agg_productivity):
+            if agg_productivity ==0.99:
+                return alpha_b_old + beta_b_old*ln_K
+            if agg_productivity == 1.01:
+                return alpha_g_old + beta_g_old*ln_K
 
-    toview = kprime[:,3,:,1]
+        #Get optimal policy function k'[k,K,s,z] (part a)
+        kprime = solve_policy_function(ind_K_grid,agg_K_grid,LOM,labor_states,productivity_states)
 
-    # Create a random vector from uniform distribution
-    rand = np.random.uniform(size=N_SIMULATION)
+        #Get the aggregate time series with the given policy function kprime
+        agg_K_time_series = simulate_economy(ind_K_grid,agg_K_grid,productivity_states,kprime)
+
+        #Get new coefficients for LOM based on this iteration
+        alpha_b_new,beta_b_new,alpha_g_new,beta_g_new = get_autoregressive_coef(agg_K_time_series)
+
+        #See if LOM coefficients have changed by a lot or not
+        norm =max(abs(alpha_b_new-alpha_b_old),abs(beta_b_new-beta_b_old), \
+                  abs(alpha_g_new-alpha_g_old),abs(beta_g_new-beta_g_old))
+
+    print("Finishing")
+
+def simulate_economy(ind_K_grid,agg_K_grid,productivity_states,kprime):
+    '''This program simulates the shocks for the individuals and returns aggregate capital after each t'''
+    # Set seed so I get the same set of shocks every time
+    np.random.seed(1)
+    # Create a random vector for each t from uniform distribution. This way each iteration has the same shock
+    rand = np.random.rand(N_SIMULATION,T_SIMULATION)
 
     #Set the aggregate state [z] to be the good state, start at stationary distribution (4% unemployed)
-    z = 1
+    z_prime = 1
     # For  each individual, store assets (column 0), labor state (column 1)
-    simulated_individuals = np.zeros((N_SIMULATION,2)).astype(int)
+    simulated_individuals = np.zeros((N_SIMULATION,2))
     # First column is where on asset grid
     #Set everyone's capital to steady state capital in good state (derived from Euler Equation)
     #(1/css) = (1/css)beta(r_ss+1-delta), r_ss = z*alpha*(Lss/Kss)^(1-alpha)
     ind_K_ss = np.power((1/BETA-(1-DELTA))/(productivity_states[1]*ALPHA*np.power(.96,1-ALPHA)),1/(ALPHA-1))
     simulated_individuals[:,0] = ind_K_ss
-    simulated_individuals[:,1] = (np.where(rand < .04, 0, 1))
+    simulated_individuals[:,1] = (np.where(rand[:,0] < .04, 0, 1))
+    #Create an array that stores aggregate K (the object of interest) (column 0), and state (column 1)
+    agg_K = np.zeros((T_SIMULATION,2))
+
 
     for t in range(T_SIMULATION):
+        #Update todays state with yesterdays tomorrow state
+        z = z_prime
+        #Store the time series
+        agg_K[t,1] = z
         #First decide whether the aggreind_K_ssgate productivity transitions
         #If the random number is less than pi[0,0] =7/8 or pi[1,0] = 1/8, then state tomorrow is 0
-        if np.random.uniform() < AGG_PI[z,0]:
+        if rand[0,t] < AGG_PI[z,0]:
             z_prime = 0
         else:
             z_prime = 1
 
         #Replace this part with index of agg_K_grid that is closest to aggregate K. Agents only know
         #the policy function at given K's in our grid but actual K may be different
-        agg_K = np.average(ind_K_grid[simulated_individuals[:,0]])
-        agg_K_index = (np.abs(agg_K_grid - agg_K)).argmin()
+        agg_K[t,0] = np.average(simulated_individuals[:,0])
+        agg_K_index = (np.abs(agg_K_grid - agg_K[t,0])).argmin()
 
         #Back out corresponding index for policy function. Currently policy function gives optimal capital for tommorrow
         # , but need the index on the capital grid corresponding to optimal capital
@@ -132,16 +156,12 @@ def main():
         simulated_individuals[:, 0] = (1 - simulated_individuals[:, 1]) * kprime[ind_index,agg_K_index,0,z] \
                 + simulated_individuals[:, 1] * kprime[ind_index,agg_K_index,1,z]
 
-        rand = np.random.uniform(size=N_SIMULATION)
         # Labor (2nd column) tomorrow is a random function = (1-l)(p00 *0+ p01*1) + (l)(p10*0+p11*1),p## conditional on z,z'
         simulated_individuals[:, 1] = (1 - simulated_individuals[:, 1]) * \
-            (np.where(rand < (PI[z,z_prime,0,0]/(PI[z,z_prime,0,0]+PI[z,z_prime,0,1])), 0, 1)) \
-            + simulated_individuals[:, 1] * np.where(rand < (PI[z,z_prime,1,0]/(PI[z,z_prime,1,0]+PI[z,z_prime,1,1])), 0, 1)
-        print("Value of Agg K is " + str(round(agg_K,2)))
-
-    #todo I ran one simulation. Now do the updating with aggregate belief using the regression
-    #also modularize the code so the simulation part is seperate code
-    print("Finishing")
+            (np.where(rand[:,t] < (PI[z,z_prime,0,0]/(PI[z,z_prime,0,0]+PI[z,z_prime,0,1])), 0, 1)) \
+            + simulated_individuals[:, 1] * np.where(rand[:,t] < (PI[z,z_prime,1,0]/(PI[z,z_prime,1,0]+PI[z,z_prime,1,1])), 0, 1)
+        #print("Value of Agg K is " + str(round(agg_K,2)))
+    return agg_K
 
 def solve_policy_function(ind_K_grid,agg_K_grid,law_of_motion,labor_states,productivity_states):
     '''This is part (a) of the homework. It take a law of motion for capital (function)
@@ -227,33 +247,32 @@ def get_rental_rate(agg_productivity, agg_capital):
     elif agg_productivity == 1.01:
         return (1 - ALPHA) * agg_productivity * np.power(.96/agg_capital, 1-ALPHA)
 
-def policy_function_method_2(capital_grid):
+def get_autoregressive_coef(agg_K_time_series):
+    '''This program runs the autoregressions to update the new coefficients on the LOM
+    Returns the alpha_b,beta_b,alpha_g,beta_g'''
+    df = pd.DataFrame(agg_K_time_series, columns=['K', 'agg_state'])
+    df['L1_K'] = df['K'].shift(1)
+    df['L1_agg_state'] = df['agg_state'].shift(1)
+    #Set lagged K to be missing if it changed states in that period
+    df.loc[df['L1_agg_state']-df['agg_state']!=0, 'L1_K'] = np.nan
+    #Create log variables
+    df['ln_K'] = np.log(df['K'])
+    df['L1_ln_K'] = np.log(df['L1_K'])
+    #Drop first  100 periods
+    df = df.iloc[100:]
+    #Now can subset to get time series for good to good states, and bad to bad states
+    good_state_df = df[df['agg_state']==1]
+    bad_state_df = df[df['agg_state']==0]
+    good_results = smf.ols('ln_K ~ L1_ln_K', data=good_state_df).fit()
+    bad_results = smf.ols('ln_K ~ L1_ln_K', data=bad_state_df).fit()
+    #print(good_results.summary())
+    alpha_g = good_results.params[0]
+    beta_g = good_results.params[1]
+    #print(bad_results.summary())
+    alpha_b = bad_results.params[0]
+    beta_b = bad_results.params[1]
 
-    #Method 2 (h-i)
-
-    #Guess k'[k] (tomorrows capital)
-    kprime_new = capital_grid
-    norm = 100
-
-    while norm > TOLERANCE:
-        kprime_old = kprime_new.copy()
-        #Use cubic spline on k'[k] to get k'(k)
-        cs_of_kprime = CubicSpline(capital_grid, kprime_old)
-        #Get k''[k] = k'(k'[k])
-        kprime_prime = cs_of_kprime(kprime_old)
-        #Get c'[k] = (1-delta)*k'[k]+Ak'[k]^alpha - k''[k]
-        cprime = (1-DELTA)*kprime_old+A*np.power(kprime_old,ALPHA)-kprime_prime
-        #Get c[k] from euler. c[k] = c'[k]/(beta*(1-delta+A*alpha*k'[k]^(alpha-1))
-        c = cprime/(BETA*(1-DELTA + A*ALPHA*np.power(kprime_old,ALPHA-1)))
-        #Get k_new'[k] = (1-delta)k0 + A*k0^alpha - c[k]
-        kprime_new = (1-DELTA)*capital_grid + A*np.power(capital_grid,ALPHA)-c
-        #Don't allow the capital tomorrow to be  negative
-        kprime_new[kprime_new <0] = 10e-3
-        #Computer norm of ||k_new'[k]-k'[k]|| and see if within tolerance
-        norm = np.linalg.norm(kprime_new - kprime_old, ord=np.inf)
-
-    #g[k] = k'[k]
-    policy_function = kprime_new
+    return alpha_b,beta_b,alpha_g,beta_g
 
 if __name__ == '__main__':
     main()
