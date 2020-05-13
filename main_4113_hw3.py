@@ -289,7 +289,7 @@ def get_rental_rate(agg_productivity, agg_capital):
     if agg_productivity == .99:
         return ALPHA * agg_productivity * np.power(.9/agg_capital, 1-ALPHA)
     elif agg_productivity == 1.01:
-        return (1 - ALPHA) * agg_productivity * np.power(.96/agg_capital, 1-ALPHA)
+        return ALPHA * agg_productivity * np.power(.96/agg_capital, 1-ALPHA)
 
 def get_autoregressive_coef(agg_K_time_series):
     '''This program runs the autoregressions to update the new coefficients on the LOM
